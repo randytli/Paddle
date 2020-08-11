@@ -34,6 +34,7 @@
 // need to manually specify them in this map.
 std::map<std::string, std::set<std::string>> op_ins_map = {
     {"layer_norm", {"X", "Scale", "Bias"}},
+    {"instance_norm", {"X", "Scale", "Bias"}},
     {"gru_unit", {"Input", "HiddenPrev", "Weight", "Bias"}},
     {"label_smooth", {"X", "PriorDist"}},
     {"assign", {"X"}},
@@ -52,6 +53,9 @@ std::map<std::string, std::set<std::string>> op_ins_map = {
 std::map<std::string, std::set<std::string>> op_outs_map = {
     {"fake_quantize_dequantize_moving_average_abs_max",
      {"Out", "OutScale", "OutAccum", "OutState"}},
+    {"batch_norm",
+     {"Y", "MeanOut", "VarianceOut", "SavedMean", "SavedVariance",
+      "ReserveSpace"}},
 };
 
 // NOTE(zhiqiu): Commonly, the outputs in auto-generated OP function are
@@ -75,7 +79,9 @@ std::map<std::string, std::set<std::string>> op_passing_outs_map = {
     {"fill_constant", {"Out"}},
     {"matmul", {"Out"}},
     {"fake_quantize_dequantize_moving_average_abs_max",
-     {"OutScale", "OutAccum", "OutState"}},
+     {"Out", "OutScale", "OutAccum", "OutState"}},
+    {"fake_quantize_dequantize_abs_max", {"Out", "OutScale"}},
+    {"amp_check_finite_and_scale", {"Out", "FoundInfinite"}},
 };
 
 // clang-format off
@@ -98,16 +104,12 @@ const char* INPUT_INITIALIZER_TEMPLATE_WITH_NULL_LIST = R"(
     }	
 )";
 
-const char* OUTPUT_INITIALIZER_TEMPLATE_WITH_NULL = R"(	
-    if (%s != nullptr) {	
-      outs["%s"] = {%s};	
-    }	
+const char* OUTPUT_INITIALIZER_TEMPLATE_WITH_NULL = R"(
+    outs["%s"] = {%s};
 )";
 
-const char* OUTPUT_INITIALIZER_TEMPLATE_WITH_NULL_LIST = R"(	
-    if (%s.size() != 0) {
-      outs["%s"] = %s;	
-    }	
+const char* OUTPUT_INITIALIZER_TEMPLATE_WITH_NULL_LIST = R"(
+    outs["%s"] = %s;
 )";
 // if inputs is list, no need {}
 const char* ARG_OUT_NUM = R"(%sNum)";
@@ -246,8 +248,8 @@ GenerateOpFunctions(const std::string& module_name) {
           const auto out_template =
               output.duplicable() ? OUTPUT_INITIALIZER_TEMPLATE_WITH_NULL_LIST
                                   : OUTPUT_INITIALIZER_TEMPLATE_WITH_NULL;
-          outs_initializer_with_null += paddle::string::Sprintf(
-              out_template, out_name, out_name, out_name);
+          outs_initializer_with_null +=
+              paddle::string::Sprintf(out_template, out_name, out_name);
         } else {
           const auto out_template = output.duplicable()
                                         ? INPUT_LIST_INITIALIZER_TEMPLATE

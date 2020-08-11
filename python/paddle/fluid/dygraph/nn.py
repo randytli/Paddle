@@ -35,7 +35,7 @@ __all__ = [
     'Conv2D', 'Conv3D', 'Pool2D', 'Linear', 'BatchNorm', 'Dropout', 'Embedding',
     'GRUUnit', 'InstanceNorm', 'LayerNorm', 'NCE', 'PRelu',
     'BilinearTensorProduct', 'Conv2DTranspose', 'Conv3DTranspose', 'GroupNorm',
-    'SpectralNorm', 'TreeConv'
+    'SpectralNorm', 'TreeConv', 'Flatten'
 ]
 
 
@@ -771,14 +771,19 @@ class Pool2D(layers.Layer):
         ceil_mode (bool, optional): Whether to use the ceil function to calculate output height and width.
             False is the default. If it is set to False, the floor function will be used. Default: False.
         exclusive (bool, optional): Whether to exclude padding points in average pooling mode. Default: True.
+        data_format (string): The data format of the input and output data. An optional string from: `"NCHW"`, `"NHWC"`.
+            The default is `"NCHW"`. When it is `"NCHW"`, the data is stored in the order of:
+            ``[batch_size, input_channels, input_height, input_width]``. When it is `"NHWC"`, the data is 
+            stored in the order of: ``[batch_size, input_height, input_width, input_channels]``
 
     Returns:
         None
 
     Raises:
-        ValueError: If 'pool_type' is not "max" nor "avg"
-        ValueError: If 'global_pooling' is False and 'pool_size' is -1
-        ValueError: If 'use_cudnn' is not a bool value.
+        ValueError: If ``pool_type`` is not "max" nor "avg".
+        ValueError: If ``global_pooling`` is False and ``pool_size`` is -1.
+        ValueError: If ``use_cudnn`` is not a bool value.
+        ValueError: If ``data_format`` is not "NCHW" nor "NHWC".
 
     Examples:
 
@@ -806,7 +811,10 @@ class Pool2D(layers.Layer):
                  global_pooling=False,
                  use_cudnn=True,
                  ceil_mode=False,
-                 exclusive=True):
+                 exclusive=True,
+                 data_format="NCHW"):
+        data_format = data_format.upper()  # supprt NHWC, nhwc, etc.
+        pool_type = pool_type.lower()  # supprt max, Max, etc.
         if pool_type not in ["max", "avg"]:
             raise ValueError(
                 "Unknown pool_type: '%s'. It can only be 'max' or 'avg'.",
@@ -820,6 +828,11 @@ class Pool2D(layers.Layer):
         if not isinstance(use_cudnn, bool):
             raise ValueError("use_cudnn should be True or False")
 
+        if data_format not in ["NCHW", "NHWC"]:
+            raise ValueError(
+                "Attr(data_format) should be 'NCHW' or 'NHWC'. Received "
+                "Attr(data_format): %s." % str(data_format))
+
         super(Pool2D, self).__init__()
 
         self._pool_type = pool_type
@@ -831,6 +844,7 @@ class Pool2D(layers.Layer):
         self._use_cudnn = use_cudnn
         self._ceil_mode = ceil_mode
         self._exclusive = exclusive
+        self._data_format = data_format
         self._l_type = 'pool2d'
 
     def forward(self, input):
@@ -839,7 +853,8 @@ class Pool2D(layers.Layer):
                      'global_pooling', self._global_pooling, 'strides',
                      self._pool_stride, 'paddings', self._pool_padding,
                      'use_cudnn', self._use_cudnn, 'ceil_mode', self._ceil_mode,
-                     'use_mkldnn', False, 'exclusive', self._exclusive)
+                     'use_mkldnn', False, 'exclusive', self._exclusive,
+                     'data_format', self._data_format)
             return core.ops.pool2d(input, *attrs)
 
         check_variable_and_dtype(
@@ -856,6 +871,7 @@ class Pool2D(layers.Layer):
             "ceil_mode": self._ceil_mode,
             "use_mkldnn": False,
             "exclusive": self._exclusive,
+            "data_format": self._data_format,
         }
         inputs = {"X": [input]}
 
@@ -1012,16 +1028,16 @@ class InstanceNorm(layers.Layer):
         num_channels(int): Indicate the number of channels of the input ``Tensor``.
         epsilon(float, optional): A value added to the denominator for
             numerical stability. Default is 1e-5.
-        param_attr(ParamAttr, optional): The parameter attribute for Parameter `scale`
+        param_attr(ParamAttr|bool, optional): The parameter attribute for Parameter `scale`
              of instance_norm. If it is set to None or one attribute of ParamAttr, instance_norm
 	     will create ParamAttr as param_attr, the name of scale can be set in ParamAttr.
 	     If the Initializer of the param_attr is not set, the parameter is initialized 
-	     one. Default: None.
-        bias_attr(ParamAttr, optional): The parameter attribute for the bias of instance_norm.
+	     one. If it is set to False, will not create param_attr. Default: None.
+        bias_attr(ParamAttr|bool, optional): The parameter attribute for the bias of instance_norm.
              If it is set to None or one attribute of ParamAttr, instance_norm
 	     will create ParamAttr as bias_attr, the name of bias can be set in ParamAttr. 
 	     If the Initializer of the bias_attr is not set, the bias is initialized zero. 
-	     Default: None.
+             If it is set to False, will not create bias_attr. Default: None.
         dtype(str, optional): Indicate the data type of the input ``Tensor``,
              which can be float32 or float64. Default: float32.
 
@@ -1055,25 +1071,30 @@ class InstanceNorm(layers.Layer):
                  bias_attr=None,
                  dtype='float32'):
         super(InstanceNorm, self).__init__()
-        assert bias_attr is not False, "bias_attr should not be False in InstanceNorm."
 
+        if param_attr == False or bias_attr == False:
+            assert bias_attr == param_attr, "param_attr and bias_attr must be set to Fasle at the same time in InstanceNorm"
         self._epsilon = epsilon
         self._param_attr = param_attr
         self._bias_attr = bias_attr
         self._dtype = dtype
 
-        self.scale = self.create_parameter(
-            attr=self._param_attr,
-            shape=[num_channels],
-            dtype=self._dtype,
-            default_initializer=Constant(1.0),
-            is_bias=False)
-        self.bias = self.create_parameter(
-            attr=self._bias_attr,
-            shape=[num_channels],
-            dtype=self._dtype,
-            default_initializer=Constant(0.0),
-            is_bias=True)
+        if param_attr != False and bias_attr != False:
+            self.scale = self.create_parameter(
+                attr=self._param_attr,
+                shape=[num_channels],
+                dtype=self._dtype,
+                default_initializer=Constant(1.0),
+                is_bias=False)
+            self.bias = self.create_parameter(
+                attr=self._bias_attr,
+                shape=[num_channels],
+                dtype=self._dtype,
+                default_initializer=Constant(0.0),
+                is_bias=True)
+        else:
+            self.scale = None
+            self.bias = None
 
     def forward(self, input):
         if in_dygraph_mode():
@@ -1086,7 +1107,10 @@ class InstanceNorm(layers.Layer):
 
         attrs = {"epsilon": self._epsilon}
 
-        inputs = {"X": [input], "Scale": [self.scale], "Bias": [self.bias]}
+        if self.scale and self.bias:
+            inputs = {"X": [input], "Scale": [self.scale], "Bias": [self.bias]}
+        else:
+            inputs = {"X": [input]}
 
         saved_mean = self._helper.create_variable_for_type_inference(
             dtype=self._dtype, stop_gradient=True)
@@ -1294,9 +1318,10 @@ class BatchNorm(layers.Layer):
                      self._fuse_with_relu, "use_global_stats",
                      self._use_global_stats, 'trainable_statistics',
                      self._trainable_statistics)
-            batch_norm_out, _, _, _, _ = core.ops.batch_norm(
+            batch_norm_out, _, _, _, _, _ = core.ops.batch_norm(
                 input, self.weight, self.bias, self._mean, self._variance,
                 mean_out, variance_out, *attrs)
+
             return dygraph_utils._append_activation_in_dygraph(
                 batch_norm_out, act=self._act)
 
@@ -2280,6 +2305,10 @@ class PRelu(layers.Layer):
             assert isinstance(
                 channel,
                 int), "channel argument is required when mode is 'channel'."
+            #NOTE(zhiqiu): The _alpha_shape should be [1, channel] + [1] * len(input_shape[2:]), not [1, channel, 1, 1].
+            # However, the suffix 1 in the list is useless, since the tensor is viewed as one demension array during kernel calculation. 
+            # And, input_shape is not required when mode is 'channel', so it is simplified.
+            #NOTE(zhiqiu): Revert shape to [1, channel, 1, 1] for compatibility with saved model of old version.
             self._alpha_shape = [1, channel, 1, 1]
         elif mode == 'element':
             assert isinstance(input_shape, (
@@ -3154,3 +3183,62 @@ class TreeConv(layers.Layer):
         else:
             pre_activation = out
         return self._helper.append_activation(pre_activation, act=self._act)
+
+
+class Flatten(layers.Layer):
+    """
+    :alias_main: paddle.nn.Flatten
+    :alias: paddle.nn.Flatten,paddle.nn.layer.Flatten,paddle.nn.layer.common.Flatten
+    This interface is used to construct a callable object of the ``FLatten`` class.
+    For more details, refer to code examples.
+    It implements flatten a contiguous range of dims into a tensor.
+
+    Equation:
+
+    Parameters:
+        start_axis(int): first dim to flatten (default = 1)
+        stop_axis(int): last dim to flatten (default = -1).
+    
+    Returns:
+        None
+
+    Examples:
+
+        .. code-block:: python
+
+          import paddle
+          from paddle import to_variable
+          import numpy as np
+
+          inp_np = np.ones([5, 2, 3, 4]).astype('float32')
+          
+          paddle.disable_static()
+          
+          inp_np = to_variable(inp_np)
+          flatten = paddle.nn.Flatten(start_axis=1, stop_axis=2)
+          flatten_res = flatten(inp_np)
+
+    """
+
+    def __init__(self, start_axis=1, stop_axis=-1):
+        super(Flatten, self).__init__()
+        self.start_axis = start_axis
+        self.stop_axis = stop_axis
+
+    def forward(self, input):
+        out = self._helper.create_variable_for_type_inference(input.dtype)
+        x_shape = self._helper.create_variable_for_type_inference(input.dtype)
+
+        if in_dygraph_mode():
+            dy_out, _ = core.ops.flatten_contiguous_range(
+                input, 'start_axis', self.start_axis, 'stop_axis',
+                self.stop_axis)
+            return dy_out
+        self._helper.append_op(
+            type="flatten_contiguous_range",
+            inputs={"X": input},
+            outputs={"Out": out,
+                     "XShape": x_shape},
+            attrs={"start_axis": self.start_axis,
+                   "stop_axis": self.stop_axis})
+        return out

@@ -20,6 +20,9 @@ from op_test import OpTest
 import paddle.fluid.core as core
 import paddle.fluid as fluid
 from paddle.fluid import compiler, Program, program_guard
+import paddle
+
+np.random.seed(10)
 
 
 def stable_softmax(x):
@@ -47,6 +50,7 @@ class TestSoftmaxOp(OpTest):
         self.shape = self.get_x_shape()
         self.axis = self.get_axis()
 
+        np.random.seed(0)
         x = np.random.uniform(0.1, 1, self.shape).astype(self.dtype)
         out = np.apply_along_axis(stable_softmax, self.axis, x)
 
@@ -180,8 +184,7 @@ class TestSoftmaxFP16Op(TestSoftmaxOp):
         pass
 
 
-@unittest.skipIf(not core.is_compiled_with_cuda(),
-                 "core is not compiled with CUDA")
+@unittest.skip('disable TestSoftmaxFP16Op2')
 class TestSoftmaxFP16Op2(TestSoftmaxOp):
     def init_kernel_type(self):
         self.dtype = np.float16
@@ -218,6 +221,44 @@ class TestSoftmaxFP16CUDNNOp(TestSoftmaxOp):
 class TestSoftmaxFP16CUDNNOp2(TestSoftmaxFP16CUDNNOp):
     def get_x_shape(self):
         return [2, 3, 4, 5]
+
+
+class TestNnFunctionalSoftmaxApi(unittest.TestCase):
+    def setUp(self):
+        self.place = paddle.CUDAPlace(0) if core.is_compiled_with_cuda(
+        ) else paddle.CPUPlace()
+        self.x_np = np.random.uniform(-1., 1., [2, 3, 4, 5]).astype('float32')
+        self.out_ref = np.apply_along_axis(stable_softmax, -1, self.x_np)
+
+    def test_api_static(self):
+        train_program = Program()
+        startup_program = Program()
+        with program_guard(train_program, startup_program):
+            x = paddle.data('X', self.x_np.shape, 'float32')
+            out = paddle.nn.functional.softmax(x)
+
+        exe = paddle.Executor(self.place)
+        res = exe.run(train_program, feed={'X': self.x_np}, fetch_list=[out])
+
+        assert np.allclose(self.out_ref, res[0])
+
+    def test_api_imperative(self):
+        with paddle.imperative.guard(self.place):
+            x = paddle.imperative.to_variable(self.x_np)
+            out = paddle.nn.functional.softmax(x)
+            assert np.allclose(self.out_ref, out.numpy())
+
+            out = paddle.nn.functional.softmax(x, axis=0)
+            out_ref = np.apply_along_axis(stable_softmax, 0, self.x_np)
+            assert np.allclose(out_ref, out.numpy())
+
+    def test_error(self):
+        with program_guard(Program(), Program()):
+            # The x should be variable and its dtype should be float32, float64.
+            self.assertRaises(TypeError, paddle.nn.functional.softmax, [1])
+
+            x = paddle.data(name='x', shape=[2, 3], dtype='int32')
+            self.assertRaises(TypeError, paddle.nn.functional.softmax, x)
 
 
 if __name__ == "__main__":
